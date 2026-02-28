@@ -279,13 +279,19 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 						elements = pair(elements, newElement, 2)
 					} else if "=" == e1v {
 						v = e0v
+						ep := e2
+						trim := 1
+						if strings.TrimSpace(e2v) == "" {
+							ep = e3
+							trim = 2
+						}
 						newElement := &HclThinElement{
 							isComment: isComment,
 							isString:  isString,
-							pair:      e2,
+							pair:      ep,
 							value:     v,
 						}
-						elements = pair(elements, newElement, 1)
+						elements = pair(elements, newElement, trim)
 					} else {
 						panic("2")
 					}
