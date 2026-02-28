@@ -178,12 +178,13 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 			readHereDoc(br, &sb)
 			if pairingNext {
 				pairingNext = false
+				eLen := len(elements)
 				newElement := &HclThinElement{
 					isHereDoc: true,
-					pair:      elements[len(elements)-5],
+					pair:      elements[eLen-5],
 					value:     sb.String(),
 				}
-				elements = pairWithLastElement(elements, newElement)
+				elements = pair(elements, newElement, 3)
 			} else {
 				elements = append(elements, &HclThinElement{
 					value:     sb.String(),
@@ -242,14 +243,52 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 			if v != "" {
 				if pairing {
 					pairing = false
-					v = elements[len(elements)-1].Value()
-					newElement := &HclThinElement{
-						isComment: isComment,
-						isString:  isString,
-						pair:      elements[len(elements)-5],
-						value:     v,
+					eLen := len(elements)
+					last := eLen - 1
+
+					e0 := elements[last-0]
+					e1 := elements[last-1]
+					e2 := elements[last-2]
+					e3 := elements[last-3]
+					e4 := elements[last-4]
+
+					e0v := e0.Value()
+					e1v := e1.Value()
+					e2v := e2.Value()
+					e3v := e3.Value()
+
+					if "=" == e2v &&
+						"" == strings.TrimSpace(e1v) &&
+						"" == strings.TrimSpace(e3v) {
+						v = e0v
+						newElement := &HclThinElement{
+							isComment: isComment,
+							isString:  isString,
+							pair:      e4,
+							value:     v,
+						}
+						elements = pair(elements, newElement, 3)
+					} else if "=" == e2v {
+						v = e0v
+						newElement := &HclThinElement{
+							isComment: isComment,
+							isString:  isString,
+							pair:      e3,
+							value:     v,
+						}
+						elements = pair(elements, newElement, 2)
+					} else if "=" == e1v {
+						v = e0v
+						newElement := &HclThinElement{
+							isComment: isComment,
+							isString:  isString,
+							pair:      e2,
+							value:     v,
+						}
+						elements = pair(elements, newElement, 1)
+					} else {
+						panic("2")
 					}
-					elements = pairWithLastElement(elements, newElement)
 				} else {
 					lastWasComment := len(elements) > 0 && elements[len(elements)-1].Comment()
 					if isComment && lastWasComment {
@@ -266,7 +305,8 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 						}
 						if pairingPending2 {
 							pairingPending2 = false
-							pairingNext = true
+							pairing = strings.TrimSpace(v) != "" && strings.TrimSpace(v) != "<"
+							pairingNext = strings.TrimSpace(v) == "" || strings.TrimSpace(v) == "<"
 						}
 						if pairingPending1 {
 							pairingPending1 = false
@@ -297,10 +337,10 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 	return elements
 }
 
-func pairWithLastElement(elements []hcl.HclElement, newElement *HclThinElement) []hcl.HclElement {
-	elements = elements[:len(elements)-4]
+func pair(elements []hcl.HclElement, newElement *HclThinElement, trim int) []hcl.HclElement {
 	last := len(elements) - 1
-	elements[last] = newElement
+	elements = elements[:last-trim]
+	elements[len(elements)-1] = newElement
 	return elements
 }
 
