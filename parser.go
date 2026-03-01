@@ -27,26 +27,28 @@ type HclThinDir struct {
 	parser hcl.HclParser
 }
 
-type HclThinElement struct {
-	hcl.HclElement
+type HclThinNode struct {
+	hcl.HclNode
 
-	isComment      bool
-	isString       bool
-	isHereDoc      bool
-	pair           hcl.HclElement
-	value          string
-	nestedElements []hcl.HclElement
+	pair    hcl.HclNode
+	value   string
+	hclType hcl.HclType
+	nodes   []hcl.HclNode
 }
 
-func (h *HclThinElement) NestedElements() []hcl.HclElement {
-	if h.nestedElements == nil {
-		return []hcl.HclElement{}
+func (h *HclThinNode) Nodes() []hcl.HclNode {
+	if h.nodes == nil {
+		return []hcl.HclNode{}
 	}
-	return h.nestedElements
+	return h.nodes
 }
 
-func (h *HclThinElement) SetNestedElements(elements []hcl.HclElement) {
-	h.nestedElements = elements
+func (h *HclThinNode) SetNodes(nodes []hcl.HclNode) {
+	h.nodes = nodes
+}
+
+func (h *HclThinNode) Type() hcl.HclType {
+	return h.hclType
 }
 
 type HclThinFile struct {
@@ -87,6 +89,10 @@ func (_ *HclThinDir) SetName(value string) {
 	panic("not implemented")
 }
 
+func (_ *HclThinDir) Nodes() []hcl.HclNode {
+	panic("not implemented")
+}
+
 func (p HclThinParser) NewDir(name string) hcl.HclDir {
 	if !strings.HasPrefix(name, "/") {
 		wd, err := os.Getwd()
@@ -118,8 +124,8 @@ func (HclThinParser) NewFile(name string) hcl.HclFile {
 	}
 }
 
-func (h *HclThinFile) Elements() []hcl.HclElement {
-	elements := []hcl.HclElement{}
+func (h *HclThinFile) Nodes() []hcl.HclNode {
+	nodes := []hcl.HclNode{}
 
 	f, err := os.Open(h.name)
 	if err != nil {
@@ -127,29 +133,29 @@ func (h *HclThinFile) Elements() []hcl.HclElement {
 	}
 	defer f.Close()
 
-	fileElement := &HclThinElement{
-		value: "",
+	fileElement := &HclThinNode{
+		value: filepath.Base(h.name),
 	}
-	fileElement.SetNestedElements(readElements(f, err, fileElement.NestedElements()))
-	elements = append(elements, fileElement)
+	fileElement.SetNodes(readNodes(f, err, fileElement.Nodes()))
+	nodes = append(nodes, fileElement)
 
-	return elements
+	return nodes
 }
 
-func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclElement {
+func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 	c := HclUnknown
 	cc := HclAlphaNumericDashOrUnderscore
+	var hclType hcl.HclType
+	hclType = hcl.HclTypeOther
+	hereDocExpected1 := false
+	hereDocExpected2 := false
 	ignore := false
-	isComment := false
-	isString := false
 	pairing := false
-	pairingSoon := false
-	stringNext := false
 	pairingNext := false
 	pairingPending1 := false
 	pairingPending2 := false
-	hereDocExpected1 := false
-	hereDocExpected2 := false
+	pairingSoon := false
+	stringNext := false
 	br := bufio.NewReader(f)
 
 	var r rune
@@ -159,7 +165,7 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 	for {
 		if stringNext {
 			stringNext = false
-			isString = true
+			hclType = hcl.HclTypeString
 			readString(br, &sb)
 			ignore = true
 			r = 0
@@ -178,17 +184,17 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 			readHereDoc(br, &sb)
 			if pairingNext {
 				pairingNext = false
-				eLen := len(elements)
-				newElement := &HclThinElement{
-					isHereDoc: true,
-					pair:      elements[eLen-5],
-					value:     sb.String(),
+				eLen := len(nodes)
+				newElement := &HclThinNode{
+					hclType: hcl.HclTypeHereDoc,
+					pair:    nodes[eLen-5],
+					value:   sb.String(),
 				}
-				elements = pair(elements, newElement, 3)
+				nodes = pair(nodes, newElement, 3)
 			} else {
-				elements = append(elements, &HclThinElement{
-					value:     sb.String(),
-					isHereDoc: true,
+				nodes = append(nodes, &HclThinNode{
+					value:   sb.String(),
+					hclType: hcl.HclTypeHereDoc,
 				})
 			}
 			sb.Reset()
@@ -225,7 +231,7 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 			if err != nil {
 				panic(err)
 			}
-			isComment = true
+			hclType = hcl.HclTypeComment
 			readComment(br, &sb)
 			ignore = true
 		} else {
@@ -235,75 +241,24 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 
 		if cc != c {
 			v := sb.String()
-			if isString {
-				isString = false
+			if hclType == hcl.HclTypeString {
 				v = strings.TrimPrefix(v, "\"")
 				v = strings.TrimSuffix(v, "\"")
 			}
 			if v != "" {
 				if pairing {
 					pairing = false
-					eLen := len(elements)
-					last := eLen - 1
-
-					e0 := elements[last-0]
-					e1 := elements[last-1]
-					e2 := elements[last-2]
-					e3 := elements[last-3]
-					e4 := elements[last-4]
-
-					e0v := e0.Value()
-					e1v := e1.Value()
-					e2v := e2.Value()
-					e3v := e3.Value()
-
-					if "=" == e2v &&
-						"" == strings.TrimSpace(e1v) &&
-						"" == strings.TrimSpace(e3v) {
-						v = e0v
-						newElement := &HclThinElement{
-							isComment: isComment,
-							isString:  isString,
-							pair:      e4,
-							value:     v,
-						}
-						elements = pair(elements, newElement, 3)
-					} else if "=" == e2v {
-						v = e0v
-						newElement := &HclThinElement{
-							isComment: isComment,
-							isString:  isString,
-							pair:      e3,
-							value:     v,
-						}
-						elements = pair(elements, newElement, 2)
-					} else if "=" == e1v {
-						v = e0v
-						ep := e2
-						trim := 1
-						if strings.TrimSpace(e2v) == "" {
-							ep = e3
-							trim = 2
-						}
-						newElement := &HclThinElement{
-							isComment: isComment,
-							isString:  isString,
-							pair:      ep,
-							value:     v,
-						}
-						elements = pair(elements, newElement, trim)
-					} else {
-						panic("2")
-					}
+					nodes, v, hclType = doPairing(nodes, v, hclType)
 				} else {
-					lastWasComment := len(elements) > 0 && elements[len(elements)-1].Comment()
-					if isComment && lastWasComment {
-						v = elements[len(elements)-1].Value() + v
-						elements[len(elements)-1].SetValue(v)
+					nLen := len(nodes)
+					lastWasComment := nLen > 0 && nodes[nLen-1].Type() == hcl.HclTypeComment
+					if hclType == hcl.HclTypeComment && lastWasComment {
+						v = nodes[len(nodes)-1].Value() + v
+						nodes[len(nodes)-1].SetValue(v)
 					} else {
-						elements = append(elements, &HclThinElement{
-							value:     v,
-							isComment: isComment,
+						nodes = append(nodes, &HclThinNode{
+							value:   v,
+							hclType: hclType,
 						})
 						if pairingNext {
 							pairingNext = false
@@ -329,7 +284,7 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 			cc = c
 		}
 
-		isComment = false
+		hclType = hcl.HclTypeToken
 
 		if willBreak {
 			break
@@ -340,14 +295,68 @@ func readElements(f *os.File, err error, elements []hcl.HclElement) []hcl.HclEle
 		}
 	}
 
-	return elements
+	return nodes
 }
 
-func pair(elements []hcl.HclElement, newElement *HclThinElement, trim int) []hcl.HclElement {
-	last := len(elements) - 1
-	elements = elements[:last-trim]
-	elements[len(elements)-1] = newElement
-	return elements
+func doPairing(nodes []hcl.HclNode, v string, hclType hcl.HclType) ([]hcl.HclNode, string, hcl.HclType) {
+	nLen := len(nodes)
+	last := nLen - 1
+
+	n0 := nodes[last-0]
+	n1 := nodes[last-1]
+	n2 := nodes[last-2]
+	n3 := nodes[last-3]
+	n4 := nodes[last-4]
+
+	n0v := n0.Value()
+	n1v := n1.Value()
+	n2v := n2.Value()
+	n3v := n3.Value()
+
+	if "=" == n2v &&
+		"" == strings.TrimSpace(n1v) &&
+		"" == strings.TrimSpace(n3v) {
+		v = n0v
+		newElement := &HclThinNode{
+			hclType: hclType,
+			pair:    n4,
+			value:   v,
+		}
+		nodes = pair(nodes, newElement, 3)
+	} else if "=" == n2v {
+		v = n0v
+		newElement := &HclThinNode{
+			hclType: hclType,
+			pair:    n3,
+			value:   v,
+		}
+		hclType = hcl.HclTypeOther
+		nodes = pair(nodes, newElement, 2)
+	} else if "=" == n1v {
+		v = n0v
+		ep := n2
+		trim := 1
+		if strings.TrimSpace(n2v) == "" {
+			ep = n3
+			trim = 2
+		}
+		newElement := &HclThinNode{
+			hclType: hclType,
+			pair:    ep,
+			value:   v,
+		}
+		nodes = pair(nodes, newElement, trim)
+	} else {
+		panic("2")
+	}
+	return nodes, v, hclType
+}
+
+func pair(nodes []hcl.HclNode, newNode *HclThinNode, trim int) []hcl.HclNode {
+	last := len(nodes) - 1
+	nodes = nodes[:last-trim]
+	nodes[len(nodes)-1] = newNode
+	return nodes
 }
 
 func readHereDoc(br *bufio.Reader, sb *strings.Builder) {
@@ -390,23 +399,19 @@ func readString(br *bufio.Reader, sb *strings.Builder) {
 	}
 }
 
-func (h *HclThinElement) SetValue(value string) {
+func (h *HclThinNode) SetValue(value string) {
 	h.value = value
 }
 
-func (h *HclThinElement) Comment() bool {
-	return h.isComment
-}
-
-func (h *HclThinElement) Value() string {
+func (h *HclThinNode) Value() string {
 	return h.value
 }
 
-func (h *HclThinElement) SetPair(pair hcl.HclElement) {
+func (h *HclThinNode) SetPair(pair hcl.HclNode) {
 	h.pair = pair
 }
 
-func (h *HclThinElement) Pair() hcl.HclElement {
+func (h *HclThinNode) Pair() hcl.HclNode {
 	return h.pair
 }
 
