@@ -30,10 +30,15 @@ type HclThinDir struct {
 type HclThinNode struct {
 	hcl.HclNode
 
-	pair    hcl.HclNode
-	value   string
-	hclType hcl.HclType
-	nodes   []hcl.HclNode
+	pair     hcl.HclNode
+	operator string
+	value    string
+	hclType  hcl.HclType
+	nodes    []hcl.HclNode
+}
+
+func (h *HclThinNode) Operator() string {
+	return h.operator
 }
 
 func (h *HclThinNode) Nodes() []hcl.HclNode {
@@ -150,6 +155,8 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 	hereDocExpected1 := false
 	hereDocExpected2 := false
 	ignore := false
+	expression := false
+	expressionPairing := false
 	pairing := false
 	pairingNext := false
 	pairingPending1 := false
@@ -220,6 +227,12 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 				pairingPending2 = false
 				pairingPending1 = true
 			}
+		} else if r == '+' {
+			c = HclEquals
+			cc = HclUnknown
+			expression = !pairing
+			expressionPairing = pairing
+			pairingSoon = true
 		} else if r == '=' {
 			c = HclEquals
 			cc = HclUnknown
@@ -248,7 +261,12 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 			if v != "" {
 				if pairing {
 					pairing = false
-					nodes, v = doPairing(nodes, v)
+					if expressionPairing {
+						pairingSoon = true
+					}
+					nodes, v = doPairing(nodes, v, expression)
+					expression = expressionPairing
+					expressionPairing = false
 				} else {
 					nLen := len(nodes)
 					lastWasComment := nLen > 0 && nodes[nLen-1].Type() == hcl.HclTypeComment
@@ -298,7 +316,7 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 	return nodes
 }
 
-func doPairing(nodes []hcl.HclNode, v string) ([]hcl.HclNode, string) {
+func doPairing(nodes []hcl.HclNode, v string, expression bool) ([]hcl.HclNode, string) {
 	nLen := len(nodes)
 	last := nLen - 1
 
@@ -313,25 +331,32 @@ func doPairing(nodes []hcl.HclNode, v string) ([]hcl.HclNode, string) {
 	n2v := n2.Value()
 	n3v := n3.Value()
 
-	if "=" == n2v &&
+	operator := "="
+	if expression {
+		operator = "+"
+	}
+	var newElement hcl.HclNode
+	if operator == n2v &&
 		"" == strings.TrimSpace(n1v) &&
 		"" == strings.TrimSpace(n3v) {
 		v = n0v
-		newElement := &HclThinNode{
-			hclType: n0.Type(),
-			pair:    n4,
-			value:   v,
+		newElement = &HclThinNode{
+			hclType:  n0.Type(),
+			pair:     n4,
+			operator: operator,
+			value:    v,
 		}
 		nodes = pair(nodes, newElement, 3)
-	} else if "=" == n2v {
+	} else if operator == n2v {
 		v = n0v
-		newElement := &HclThinNode{
-			hclType: n0.Type(),
-			pair:    n3,
-			value:   v,
+		newElement = &HclThinNode{
+			hclType:  n0.Type(),
+			pair:     n3,
+			operator: operator,
+			value:    v,
 		}
 		nodes = pair(nodes, newElement, 2)
-	} else if "=" == n1v {
+	} else if operator == n1v {
 		v = n0v
 		ep := n2
 		trim := 1
@@ -339,10 +364,11 @@ func doPairing(nodes []hcl.HclNode, v string) ([]hcl.HclNode, string) {
 			ep = n3
 			trim = 2
 		}
-		newElement := &HclThinNode{
-			hclType: n0.Type(),
-			pair:    ep,
-			value:   v,
+		newElement = &HclThinNode{
+			hclType:  n0.Type(),
+			pair:     ep,
+			operator: operator,
+			value:    v,
 		}
 		nodes = pair(nodes, newElement, trim)
 	} else {
@@ -351,7 +377,7 @@ func doPairing(nodes []hcl.HclNode, v string) ([]hcl.HclNode, string) {
 	return nodes, v
 }
 
-func pair(nodes []hcl.HclNode, newNode *HclThinNode, trim int) []hcl.HclNode {
+func pair(nodes []hcl.HclNode, newNode hcl.HclNode, trim int) []hcl.HclNode {
 	last := len(nodes) - 1
 	nodes = nodes[:last-trim]
 	nodes[len(nodes)-1] = newNode
