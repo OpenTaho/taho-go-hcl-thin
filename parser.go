@@ -262,11 +262,13 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 				if pairing {
 					pairing = false
 					if expressionPairing {
+						expressionPairing = false
 						pairingSoon = true
+					} else {
+						nodes, v = doPairing(nodes, v, expression)
+						expression = expressionPairing
+						expressionPairing = false
 					}
-					nodes, v = doPairing(nodes, v, expression)
-					expression = expressionPairing
-					expressionPairing = false
 				} else {
 					nLen := len(nodes)
 					lastWasComment := nLen > 0 && nodes[nLen-1].Type() == hcl.HclTypeComment
@@ -380,7 +382,18 @@ func doPairing(nodes []hcl.HclNode, v string, expression bool) ([]hcl.HclNode, s
 func pair(nodes []hcl.HclNode, newNode hcl.HclNode, trim int) []hcl.HclNode {
 	last := len(nodes) - 1
 	nodes = nodes[:last-trim]
-	nodes[len(nodes)-1] = newNode
+	var hclType hcl.HclType
+	nType := newNode.Type()
+	if nType == hcl.HclTypeHereDoc ||
+		newNode.Type() == hcl.HclTypeHereDocWithIndent {
+		hclType = hcl.HclTypeMultiLinePair
+	} else {
+		hclType = hcl.HclTypeSingleLinePair
+	}
+	nodes[len(nodes)-1] = &HclThinNode{
+		hclType: hclType,
+		pair:    newNode,
+	}
 	return nodes
 }
 
