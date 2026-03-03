@@ -37,14 +37,19 @@ type HclThinNode struct {
 	nodes    []hcl.HclNode
 }
 
+func (h *HclThinNode) SetType(value hcl.HclType) {
+	h.hclType = value
+}
+
+func (h *HclThinNode) SetOperator(operator string) {
+	h.operator = operator
+}
+
 func (h *HclThinNode) Operator() string {
 	return h.operator
 }
 
 func (h *HclThinNode) Nodes() []hcl.HclNode {
-	if h.nodes == nil {
-		return []hcl.HclNode{}
-	}
 	return h.nodes
 }
 
@@ -141,31 +146,23 @@ func (h *HclThinFile) Nodes() []hcl.HclNode {
 	fileElement := &HclThinNode{
 		value: filepath.Base(h.name),
 	}
-	fileElement.SetNodes(readNodes(f, err, fileElement.Nodes()))
+	br := bufio.NewReader(f)
+	fileElement.SetNodes(readNodes(br, fileElement.Nodes(), false))
 	nodes = append(nodes, fileElement)
 
 	return nodes
 }
 
-func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
+func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclNode {
 	c := HclUnknown
 	cc := HclAlphaNumericDashOrUnderscore
 	var hclType hcl.HclType
 	hclType = hcl.HclTypeOther
-	hereDocExpected1 := false
-	hereDocExpected2 := false
 	ignore := false
-	expression := false
-	expressionPairing := false
-	pairing := false
-	pairingNext := false
-	pairingPending1 := false
-	pairingPending2 := false
-	pairingSoon := false
 	stringNext := false
-	br := bufio.NewReader(f)
 
 	var r rune
+	var err error
 	var sb strings.Builder
 
 	willBreak := false
@@ -184,28 +181,7 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 			}
 		}
 
-		if hereDocExpected2 {
-			hereDocExpected2 = false
-			ignore = true
-			sb.WriteRune(r)
-			hclType = readHereDoc(br, &sb)
-			if pairingNext {
-				pairingNext = false
-				eLen := len(nodes)
-				newElement := &HclThinNode{
-					hclType: hclType,
-					pair:    nodes[eLen-5],
-					value:   sb.String(),
-				}
-				nodes = pair(nodes, newElement, 3)
-			} else {
-				nodes = append(nodes, &HclThinNode{
-					value:   sb.String(),
-					hclType: hcl.HclTypeHereDoc,
-				})
-			}
-			sb.Reset()
-		} else if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '-' || r == '_' {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '-' || r == '_' {
 			c = HclAlphaNumericDashOrUnderscore
 		} else if r == '"' {
 			stringNext = true
@@ -214,29 +190,33 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 		} else if r == '\n' {
 			c = HclNewLine
 			cc = HclUnknown
+			if exitOnEOL {
+				willBreak = true
+			}
 		} else if unicode.IsSpace(r) {
 			c = HclSpace
-		} else if r == '<' {
-			c = HclOther
-			cc = HclUnknown
-			if hereDocExpected1 {
-				hereDocExpected1 = false
-				hereDocExpected2 = true
-			} else if pairingPending2 {
-				hereDocExpected1 = true
-				pairingPending2 = false
-				pairingPending1 = true
-			}
-		} else if r == '+' {
-			c = HclEquals
-			cc = HclUnknown
-			expression = !pairing
-			expressionPairing = pairing
-			pairingSoon = true
 		} else if r == '=' {
-			c = HclEquals
+			// Read from here to the end of the line to parse expressions
+			//
+			// If we encounter parentheses, brackets, or braces we will need to parse
+			// those appropiatly.
+			c = HclUnknown
 			cc = HclUnknown
-			pairingSoon = true
+			ignore = true
+			v := sb.String()
+			if v != "" {
+				nodes = addNode(nodes, hclType, v)
+			}
+			sb.Reset()
+			last := len(nodes) - 1
+			if nodes[last].Type() == hcl.HclTypeSpace {
+				nodes = nodes[:last]
+				last = len(nodes) - 1
+			}
+			n := nodes[last]
+			n.SetType(hcl.HclTypePair)
+			n.SetNodes(readNodes(br, n.Nodes(), true))
+			sb.Reset()
 		} else if r == '#' {
 			c = HclPound
 			cc = HclUnknown
@@ -258,45 +238,18 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 				v = strings.TrimPrefix(v, "\"")
 				v = strings.TrimSuffix(v, "\"")
 			}
+
 			if v != "" {
-				if pairing {
-					pairing = false
-					if expressionPairing {
-						expressionPairing = false
-						pairingSoon = true
-					} else {
-						nodes, v = doPairing(nodes, v, expression)
-						expression = expressionPairing
-						expressionPairing = false
-					}
-				} else {
-					nLen := len(nodes)
-					lastWasComment := nLen > 0 && nodes[nLen-1].Type() == hcl.HclTypeComment
-					if hclType == hcl.HclTypeComment && lastWasComment {
-						v = nodes[len(nodes)-1].Value() + v
-						nodes[len(nodes)-1].SetValue(v)
-					} else {
-						nodes = append(nodes, &HclThinNode{
-							value:   v,
-							hclType: hclType,
-						})
-						if pairingNext {
-							pairingNext = false
-							pairing = true
-						}
-						if pairingPending2 {
-							pairingPending2 = false
-							pairing = strings.TrimSpace(v) != "" && strings.TrimSpace(v) != "<"
-							pairingNext = strings.TrimSpace(v) == "" || strings.TrimSpace(v) == "<"
-						}
-						if pairingPending1 {
-							pairingPending1 = false
-							pairingPending2 = true
-						}
-						if pairingSoon {
-							pairingSoon = false
-							pairingPending1 = true
-						}
+				nodes = addNode(nodes, hclType, v)
+				last := len(nodes) - 1
+				if last > 0 {
+					if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
+						hclType = readHereDoc(br, &sb)
+						nodes = nodes[:last]
+						last = len(nodes) - 1
+						nodes[last].SetType(hclType)
+						nodes[last].SetValue(sb.String())
+						willBreak = true
 					}
 				}
 				sb.Reset()
@@ -318,81 +271,21 @@ func readNodes(f *os.File, err error, nodes []hcl.HclNode) []hcl.HclNode {
 	return nodes
 }
 
-func doPairing(nodes []hcl.HclNode, v string, expression bool) ([]hcl.HclNode, string) {
+func addNode(nodes []hcl.HclNode, hclType hcl.HclType, v string) []hcl.HclNode {
 	nLen := len(nodes)
 	last := nLen - 1
-
-	n0 := nodes[last-0]
-	n1 := nodes[last-1]
-	n2 := nodes[last-2]
-	n3 := nodes[last-3]
-	n4 := nodes[last-4]
-
-	n0v := n0.Value()
-	n1v := n1.Value()
-	n2v := n2.Value()
-	n3v := n3.Value()
-
-	operator := "="
-	if expression {
-		operator = "+"
-	}
-	var newElement hcl.HclNode
-	if operator == n2v &&
-		"" == strings.TrimSpace(n1v) &&
-		"" == strings.TrimSpace(n3v) {
-		v = n0v
-		newElement = &HclThinNode{
-			hclType:  n0.Type(),
-			pair:     n4,
-			operator: operator,
-			value:    v,
-		}
-		nodes = pair(nodes, newElement, 3)
-	} else if operator == n2v {
-		v = n0v
-		newElement = &HclThinNode{
-			hclType:  n0.Type(),
-			pair:     n3,
-			operator: operator,
-			value:    v,
-		}
-		nodes = pair(nodes, newElement, 2)
-	} else if operator == n1v {
-		v = n0v
-		ep := n2
-		trim := 1
-		if strings.TrimSpace(n2v) == "" {
-			ep = n3
-			trim = 2
-		}
-		newElement = &HclThinNode{
-			hclType:  n0.Type(),
-			pair:     ep,
-			operator: operator,
-			value:    v,
-		}
-		nodes = pair(nodes, newElement, trim)
+	lastWasComment := nLen > 0 && nodes[last].Type() == hcl.HclTypeComment
+	if hclType == hcl.HclTypeComment && lastWasComment {
+		v = nodes[last].Value() + v
+		nodes[last].SetValue(v)
 	} else {
-		panic("2")
-	}
-	return nodes, v
-}
-
-func pair(nodes []hcl.HclNode, newNode hcl.HclNode, trim int) []hcl.HclNode {
-	last := len(nodes) - 1
-	nodes = nodes[:last-trim]
-	var hclType hcl.HclType
-	nType := newNode.Type()
-	if nType == hcl.HclTypeHereDoc ||
-		newNode.Type() == hcl.HclTypeHereDocWithIndent {
-		hclType = hcl.HclTypeMultiLinePair
-	} else {
-		hclType = hcl.HclTypeSingleLinePair
-	}
-	nodes[len(nodes)-1] = &HclThinNode{
-		hclType: hclType,
-		pair:    newNode,
+		if strings.TrimSpace(v) == "" {
+			hclType = hcl.HclTypeSpace
+		}
+		nodes = append(nodes, &HclThinNode{
+			value:   v,
+			hclType: hclType,
+		})
 	}
 	return nodes
 }
