@@ -30,11 +30,12 @@ type HclThinDir struct {
 type HclThinNode struct {
 	hcl.HclNode
 
-	pair     hcl.HclNode
-	operator string
-	value    string
+	comment  string
 	hclType  hcl.HclType
 	nodes    []hcl.HclNode
+	operator string
+	pair     hcl.HclNode
+	value    string
 }
 
 func (h *HclThinNode) SetType(value hcl.HclType) {
@@ -49,7 +50,7 @@ func (h *HclThinNode) Operator() string {
 	return h.operator
 }
 
-func (h *HclThinNode) Nodes() []hcl.HclNode {
+func (h *HclThinNode) Body() []hcl.HclNode {
 	return h.nodes
 }
 
@@ -77,7 +78,7 @@ func (h *HclThinDir) Files() ([]hcl.HclFile, error) {
 	for _, file := range files {
 		name := file.Name()
 		if !file.IsDir() {
-			m, err := regexp.MatchString(".*\\.(hcl|tf|tfvars)", name)
+			m, err := regexp.MatchString(".*\\.(hcl|tf|tfvars)$", name)
 			if err != nil {
 				panic(err)
 			}
@@ -99,7 +100,7 @@ func (_ *HclThinDir) SetName(value string) {
 	panic("not implemented")
 }
 
-func (_ *HclThinDir) Nodes() []hcl.HclNode {
+func (_ *HclThinDir) Body() []hcl.HclNode {
 	panic("not implemented")
 }
 
@@ -134,7 +135,7 @@ func (HclThinParser) NewFile(name string) hcl.HclFile {
 	}
 }
 
-func (h *HclThinFile) Nodes() []hcl.HclNode {
+func (h *HclThinFile) Body() []hcl.HclNode {
 	nodes := []hcl.HclNode{}
 
 	f, err := os.Open(h.name)
@@ -147,7 +148,7 @@ func (h *HclThinFile) Nodes() []hcl.HclNode {
 		value: filepath.Base(h.name),
 	}
 	br := bufio.NewReader(f)
-	fileElement.SetNodes(readNodes(br, fileElement.Nodes(), false))
+	fileElement.SetNodes(readNodes(br, fileElement.Body(), false))
 	nodes = append(nodes, fileElement)
 
 	return nodes
@@ -209,13 +210,23 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			}
 			sb.Reset()
 			last := len(nodes) - 1
-			if nodes[last].Type() == hcl.HclTypeSpace {
+			nType := nodes[last].Type()
+			var pop bool
+			comment := ""
+			if nType == hcl.HclTypeComment {
+				comment = nodes[last].Value()
+				pop = true
+			} else {
+				pop = nType == hcl.HclTypeSpace
+			}
+			if pop {
 				nodes = nodes[:last]
 				last = len(nodes) - 1
 			}
 			n := nodes[last]
+			n.SetComment(comment)
 			n.SetType(hcl.HclTypePair)
-			n.SetNodes(readNodes(br, n.Nodes(), true))
+			n.SetNodes(readNodes(br, n.Body(), true))
 			sb.Reset()
 		} else if r == '#' {
 			c = HclPound
@@ -225,7 +236,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 				panic(err)
 			}
 			hclType = hcl.HclTypeComment
-			readComment(br, &sb)
+			readLine(br, &sb)
 			ignore = true
 		} else {
 			c = HclOther
@@ -244,7 +255,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 				last := len(nodes) - 1
 				if last > 0 {
 					if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
-						hclType = readHereDoc(br, &sb)
+						hclType = readDoc(br, &sb)
 						nodes = nodes[:last]
 						last = len(nodes) - 1
 						nodes[last].SetType(hclType)
@@ -290,7 +301,7 @@ func addNode(nodes []hcl.HclNode, hclType hcl.HclType, v string) []hcl.HclNode {
 	return nodes
 }
 
-func readHereDoc(br *bufio.Reader, sb *strings.Builder) hcl.HclType {
+func readDoc(br *bufio.Reader, sb *strings.Builder) hcl.HclType {
 	s, err := br.ReadString('\n')
 	if err != nil {
 		panic(err)
@@ -318,7 +329,7 @@ func readHereDoc(br *bufio.Reader, sb *strings.Builder) hcl.HclType {
 	return hclType
 }
 
-func readComment(br *bufio.Reader, sb *strings.Builder) {
+func readLine(br *bufio.Reader, sb *strings.Builder) {
 	s, err := br.ReadString('\n')
 	if err != nil {
 		panic(err)
@@ -335,6 +346,10 @@ func readString(br *bufio.Reader, sb *strings.Builder) {
 	if strings.HasSuffix(s, "\\\"") {
 		readString(br, sb)
 	}
+}
+
+func (h *HclThinNode) SetComment(value string) {
+	h.comment = value
 }
 
 func (h *HclThinNode) SetValue(value string) {
