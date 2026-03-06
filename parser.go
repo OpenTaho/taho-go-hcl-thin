@@ -197,31 +197,21 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		} else if unicode.IsSpace(r) {
 			c = HclSpace
 		} else if r == '=' {
-			// Read from here to the end of the line to parse expressions
-			//
-			// If we encounter parentheses, brackets, or braces we will need to parse
-			// those appropiatly.
 			c = HclUnknown
 			cc = HclUnknown
 			ignore = true
 			v := sb.String()
-			if v != "" {
-				nodes = addNode(nodes, hclType, v)
-			}
 			sb.Reset()
 			last := len(nodes) - 1
 			nType := nodes[last].Type()
-			var pop bool
 			comment := ""
-			if nType == hcl.HclTypeComment {
-				comment = nodes[last].Value()
-				pop = true
-			} else {
-				pop = nType == hcl.HclTypeSpace
+			if nType == hcl.HclTypeSpace && nodes[last].Value() != "\n" {
+				nodes, last = popNode(nodes, last)
+				nType = nodes[last].Type()
 			}
-			if pop {
-				nodes = nodes[:last]
-				last = len(nodes) - 1
+			if strings.TrimSpace(v) != "" {
+				nodes = addNode(nodes, hclType, v)
+				last++
 			}
 			n := nodes[last]
 			n.SetComment(comment)
@@ -231,6 +221,10 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		} else if r == '#' {
 			c = HclPound
 			cc = HclUnknown
+			if sb.String() == "\n" {
+				nodes = addNode(nodes, hcl.HclTypeSpace, sb.String())
+				sb.Reset()
+			}
 			_, err = sb.WriteRune(r)
 			if err != nil {
 				panic(err)
@@ -252,19 +246,22 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 
 			if v != "" {
 				nodes = addNode(nodes, hclType, v)
-				last := len(nodes) - 1
+			}
+
+			last := len(nodes) - 1
+			if last > 0 {
 				if last > 0 {
 					if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
 						hclType = readDoc(br, &sb)
 						nodes = nodes[:last]
-						last = len(nodes) - 1
+						last--
 						nodes[last].SetType(hclType)
 						nodes[last].SetValue(sb.String())
 						willBreak = true
 					}
 				}
-				sb.Reset()
 			}
+			sb.Reset()
 			cc = c
 		}
 
@@ -280,6 +277,12 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 	}
 
 	return nodes
+}
+
+func popNode(nodes []hcl.HclNode, last int) ([]hcl.HclNode, int) {
+	nodes = nodes[:last]
+	last = len(nodes) - 1
+	return nodes, last
 }
 
 func addNode(nodes []hcl.HclNode, hclType hcl.HclType, v string) []hcl.HclNode {
