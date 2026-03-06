@@ -170,7 +170,11 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		if stringNext {
 			stringNext = false
 			hclType = hcl.HclTypeString
-			readString(br, &sb)
+			stringNodes := []hcl.HclNode{}
+			stringNodes, err = readString(br, &sb, stringNodes)
+			if err != nil {
+				panic(err)
+			}
 			ignore = true
 			r = 0
 		} else {
@@ -181,7 +185,10 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			}
 		}
 
-		if unicode.IsLetter(r) || unicode.IsNumber(r) || r == '-' || r == '_' {
+		if r == '}' {
+			willBreak = true
+			ignore = true
+		} else if isToken(r) {
 			c = HclAlphaNumericDashOrUnderscore
 		} else if r == '"' {
 			stringNext = true
@@ -231,6 +238,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			hclType = hcl.HclTypeComment
 			readLine(br, &sb)
 			ignore = true
+			willBreak = exitOnEOL
 		} else {
 			c = HclOther
 			cc = HclUnknown
@@ -276,6 +284,10 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 	}
 
 	return nodes
+}
+
+func isToken(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '-' || r == '_'
 }
 
 func popNode(nodes []hcl.HclNode, last int) ([]hcl.HclNode, int) {
@@ -339,15 +351,58 @@ func readLine(br *bufio.Reader, sb *strings.Builder) {
 	sb.WriteString(s)
 }
 
-func readString(br *bufio.Reader, sb *strings.Builder) {
-	s, err := br.ReadString('"')
-	if err != nil {
-		panic(err)
+func readString(br *bufio.Reader, sb *strings.Builder, nodes []hcl.HclNode) ([]hcl.HclNode, error) {
+	escape := false
+	interlop := false
+	for {
+		r, _, err := br.ReadRune()
+		if err != nil {
+			return nil, err
+		}
+
+		if r == '\\' {
+			escape = !escape
+			interlop = false
+			sb.WriteRune(r)
+		} else if r == '$' {
+			if interlop {
+				sb.WriteRune('$')
+				interlop = false
+			} else {
+				interlop = true
+			}
+			sb.WriteRune(r)
+		} else if interlop && r == '{' {
+			interlop = false
+			nodes = readNodes(br, nodes, false)
+			sb.WriteRune('{')
+			for n := range nodes {
+				if nodes[n].Type() == hcl.HclTypeString {
+					sb.WriteString("\"" + nodes[n].Value() + "\"")
+				} else {
+					sb.WriteString(nodes[n].Value())
+				}
+			}
+			sb.WriteRune('}')
+		} else if r == '"' {
+			if interlop {
+				sb.WriteRune('$')
+			}
+			interlop = false
+			sb.WriteRune(r)
+			if !escape {
+				break
+			}
+			escape = false
+		} else {
+			if interlop {
+				sb.WriteRune('$')
+			}
+			interlop = false
+			sb.WriteRune(r)
+		}
 	}
-	sb.WriteString(s)
-	if strings.HasSuffix(s, "\\\"") {
-		readString(br, sb)
-	}
+	return nodes, nil
 }
 
 func (h *HclThinNode) SetComment(value string) {
