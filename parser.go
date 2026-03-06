@@ -34,7 +34,6 @@ type HclThinNode struct {
 	hclType  hcl.HclType
 	nodes    []hcl.HclNode
 	operator string
-	pair     hcl.HclNode
 	value    string
 }
 
@@ -221,7 +220,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		} else if r == '#' {
 			c = HclPound
 			cc = HclUnknown
-			if sb.String() == "\n" {
+			if strings.TrimSpace(sb.String()) == "" && sb.String() != "" {
 				nodes = addNode(nodes, hcl.HclTypeSpace, sb.String())
 				sb.Reset()
 			}
@@ -361,14 +360,6 @@ func (h *HclThinNode) SetValue(value string) {
 
 func (h *HclThinNode) Value() string {
 	return h.value
-}
-
-func (h *HclThinNode) SetPair(pair hcl.HclNode) {
-	h.pair = pair
-}
-
-func (h *HclThinNode) Pair() hcl.HclNode {
-	return h.pair
 }
 
 func (h *HclThinFile) Name() string {
