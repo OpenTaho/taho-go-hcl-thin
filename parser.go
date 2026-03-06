@@ -377,10 +377,12 @@ func readString(br *bufio.Reader, sb *strings.Builder, nodes []hcl.HclNode) ([]h
 			nodes = readNodes(br, nodes, false)
 			sb.WriteRune('{')
 			for n := range nodes {
-				if nodes[n].Type() == hcl.HclTypeString {
-					sb.WriteString("\"" + nodes[n].Value() + "\"")
+				node := nodes[n]
+				v := node.Value()
+				if node.Type() == hcl.HclTypeString {
+					sb.WriteString("\"" + v + "\"")
 				} else {
-					sb.WriteString(nodes[n].Value())
+					sb.WriteString(v)
 				}
 			}
 			sb.WriteRune('}')
