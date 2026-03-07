@@ -3,6 +3,7 @@ package parser
 import (
 	"bufio"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,11 +31,21 @@ type HclThinDir struct {
 type HclThinNode struct {
 	hcl.HclNode
 
-	comment  string
-	hclType  hcl.HclType
-	nodes    []hcl.HclNode
-	operator string
-	value    string
+	comment        string
+	docIndentation int
+	docTag         string
+	hclType        hcl.HclType
+	nodes          []hcl.HclNode
+	operator       string
+	value          string
+}
+
+func (h *HclThinNode) SetDocIndentation(value int) {
+	h.docIndentation = value
+}
+
+func (h *HclThinNode) SetDocTag(value string) {
+	h.docTag = value
 }
 
 func (h *HclThinNode) SetType(value hcl.HclType) {
@@ -279,15 +290,25 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 
 			last := len(nodes) - 1
 			if last > 0 {
-				if last > 0 {
-					if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
-						hclType = readDoc(br, &sb)
-						nodes = nodes[:last]
-						last--
-						nodes[last].SetType(hclType)
-						nodes[last].SetValue(sb.String())
-						willBreak = true
+				if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
+					hclType, docTag := readDoc(br, &sb)
+					nodes = nodes[:last]
+					last--
+					n := nodes[last]
+					n.SetType(hclType)
+					n.SetDocTag(docTag)
+					if hclType == hcl.HclTypeDocWithIndent {
+						lines := strings.Split(sb.String(), "\n")
+						lines = lines[:len(lines)-1]
+						lead := math.MaxInt32
+						for lineNum := range lines {
+							line := lines[lineNum]
+							lead = min(lead, len(line)-len(strings.TrimLeft(line, " ")))
+						}
+						n.SetDocIndentation(lead)
 					}
+					n.SetValue(sb.String())
+					willBreak = true
 				}
 			}
 			sb.Reset()
@@ -337,32 +358,33 @@ func addNode(nodes []hcl.HclNode, hclType hcl.HclType, v string) []hcl.HclNode {
 	return nodes
 }
 
-func readDoc(br *bufio.Reader, sb *strings.Builder) hcl.HclType {
+func readDoc(br *bufio.Reader, sb *strings.Builder) (hcl.HclType, string) {
 	s, err := br.ReadString('\n')
 	if err != nil {
 		panic(err)
 	}
 	sb.WriteString(s)
-	end := strings.TrimPrefix(sb.String(), "<")
+	docTag := strings.TrimSuffix(strings.TrimPrefix(sb.String(), "<"), "\n")
 	var hclType hcl.HclType
-	hclType = hcl.HclTypeHereDoc
-	if strings.HasPrefix(end, "-") {
-		hclType = hcl.HclTypeHereDocWithIndent
-		end = strings.TrimPrefix(end, "-")
+	hclType = hcl.HclTypeDoc
+	if strings.HasPrefix(docTag, "-") {
+		hclType = hcl.HclTypeDocWithIndent
+		docTag = strings.TrimPrefix(docTag, "-")
 	}
 	sb.Reset()
 	for true {
 		s, err = br.ReadString('\n')
-		if strings.HasSuffix(s, end) {
+		if strings.HasSuffix(s, docTag+"\n") {
 			s = sb.String()
 			s = strings.TrimSuffix(s, "\n")
 			sb.Reset()
 			sb.WriteString(s)
 			break
 		}
-		sb.WriteString(s + "\n")
+		sb.WriteString(s)
 	}
-	return hclType
+	sb.WriteString("\n")
+	return hclType, docTag
 }
 
 func readLine(br *bufio.Reader, sb *strings.Builder) {
@@ -400,12 +422,8 @@ func readString(br *bufio.Reader, sb *strings.Builder, nodes []hcl.HclNode) ([]h
 			sb.WriteRune('{')
 			for n := range nodes {
 				node := nodes[n]
-				v := node.Value()
-				if node.Type() == hcl.HclTypeString {
-					sb.WriteString("\"" + v + "\"")
-				} else {
-					sb.WriteString(v)
-				}
+				v := node.String()
+				sb.WriteString(v)
 			}
 			sb.WriteRune('}')
 		} else if r == '"' {
@@ -439,6 +457,19 @@ func (h *HclThinNode) SetValue(value string) {
 
 func (h *HclThinNode) Value() string {
 	return h.value
+}
+
+func (h *HclThinNode) String() string {
+	v := h.value
+	switch h.hclType {
+	case hcl.HclTypeString:
+		v = "\"" + h.value + "\""
+	case hcl.HclTypeDoc:
+		v = "<<" + h.docTag + "\n" + h.value + h.docTag + "\n"
+	case hcl.HclTypeDocWithIndent:
+		v = "<<-" + h.docTag + "\n" + h.value + strings.Repeat(" ", h.docIndentation) + h.docTag + "\n"
+	}
+	return v
 }
 
 func (h *HclThinFile) Name() string {
