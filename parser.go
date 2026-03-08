@@ -158,13 +158,14 @@ func (h *HclThinFile) Body() []hcl.HclNode {
 		value: filepath.Base(h.name),
 	}
 	br := bufio.NewReader(f)
-	fileElement.SetBody(readNodes(br, fileElement.Body(), false))
+	echo := &strings.Builder{}
+	fileElement.SetBody(readNodes(br, echo, fileElement.Body(), false))
 	nodes = append(nodes, fileElement)
 
 	return nodes
 }
 
-func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclNode {
+func readNodes(br *bufio.Reader, echo *strings.Builder, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclNode {
 	c := HclUnknown
 	cc := HclAlphaNumericDashOrUnderscore
 	var hclType hcl.HclType
@@ -182,7 +183,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			stringNext = false
 			hclType = hcl.HclTypeString
 			stringNodes := []hcl.HclNode{}
-			stringNodes, err = readString(br, &sb, stringNodes)
+			stringNodes, err = readString(br, echo, &sb, stringNodes)
 			if err != nil {
 				panic(err)
 			}
@@ -191,16 +192,17 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		} else {
 			r, _, err = br.ReadRune()
 			if err != nil {
-				r = ' '
+				r = 0
 				willBreak = true
 			}
+			echo.WriteRune(r)
 		}
 
 		if r == '(' {
 			ignore = true
 			c = HclOther
 			cc = HclUnknown
-			subnodes := readNodes(br, []hcl.HclNode{}, false)
+			subnodes := readNodes(br, echo, []hcl.HclNode{}, false)
 			n := &HclThinNode{
 				value:   "()",
 				hclType: hcl.HclTypeSpan,
@@ -214,7 +216,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			ignore = true
 			c = HclOther
 			cc = HclUnknown
-			subnodes := readNodes(br, []hcl.HclNode{}, true)
+			subnodes := readNodes(br, echo, []hcl.HclNode{}, true)
 			nodes = append(nodes, &HclThinNode{
 				value:   "{}",
 				hclType: hcl.HclTypeBlock,
@@ -240,23 +242,40 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 		} else if r == '=' {
 			c = HclUnknown
 			cc = HclUnknown
-			ignore = true
-			v := sb.String()
-			sb.Reset()
-			last := len(nodes) - 1
-			nType := nodes[last].Type()
-			if nType == hcl.HclTypeSpace && nodes[last].Value() != "\n" {
-				nodes, last = popNode(nodes, last)
-				nType = nodes[last].Type()
+			p, err := br.Peek(1)
+			if err != nil {
+				panic(err)
 			}
-			if strings.TrimSpace(v) != "" {
-				nodes = addNode(nodes, hclType, v)
-				last++
+			if p[0] == '=' {
+				r, _, err = br.ReadRune()
+				if err != nil {
+					panic(err)
+				}
+				echo.WriteRune(r)
+				sb.WriteRune(r)
+			} else {
+				ignore = true
+				v := sb.String()
+				sb.Reset()
+				last := len(nodes) - 1
+				var nType hcl.HclType
+				nType = hcl.HclTypeOther
+				if last > 0 {
+					nType = nodes[last].Type()
+					if nType == hcl.HclTypeSpace && nodes[last].Value() != "\n" {
+						nodes, last = popNode(nodes, last)
+						nType = nodes[last].Type()
+					}
+					if strings.TrimSpace(v) != "" {
+						nodes = addNode(nodes, hclType, v)
+						last++
+					}
+					n := nodes[last]
+					n.SetType(hcl.HclTypePair)
+					n.SetBody(readNodes(br, echo, n.Body(), true))
+				}
+				sb.Reset()
 			}
-			n := nodes[last]
-			n.SetType(hcl.HclTypePair)
-			n.SetBody(readNodes(br, n.Body(), true))
-			sb.Reset()
 		} else if r == '#' {
 			c = HclPound
 			cc = HclUnknown
@@ -269,7 +288,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 				panic(err)
 			}
 			hclType = hcl.HclTypeComment
-			readLine(br, &sb)
+			readLine(br, echo, &sb)
 			ignore = true
 			willBreak = exitOnEOL
 		} else {
@@ -291,7 +310,8 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 			last := len(nodes) - 1
 			if last > 0 {
 				if nodes[last].Value() == "<" || nodes[last-1].Value() == "<" {
-					hclType, docTag := readDoc(br, &sb)
+					newEcho := &strings.Builder{}
+					hclType, docTag := readDoc(br, newEcho, &sb)
 					nodes = nodes[:last]
 					last--
 					n := nodes[last]
@@ -308,6 +328,7 @@ func readNodes(br *bufio.Reader, nodes []hcl.HclNode, exitOnEOL bool) []hcl.HclN
 						n.SetDocIndentation(lead)
 					}
 					n.SetValue(sb.String())
+					echo.WriteString(newEcho.String())
 					willBreak = true
 				}
 			}
@@ -358,11 +379,12 @@ func addNode(nodes []hcl.HclNode, hclType hcl.HclType, v string) []hcl.HclNode {
 	return nodes
 }
 
-func readDoc(br *bufio.Reader, sb *strings.Builder) (hcl.HclType, string) {
+func readDoc(br *bufio.Reader, echo *strings.Builder, sb *strings.Builder) (hcl.HclType, string) {
 	s, err := br.ReadString('\n')
 	if err != nil {
 		panic(err)
 	}
+	echo.WriteString(s)
 	sb.WriteString(s)
 	docTag := strings.TrimSuffix(strings.TrimPrefix(sb.String(), "<"), "\n")
 	var hclType hcl.HclType
@@ -382,65 +404,65 @@ func readDoc(br *bufio.Reader, sb *strings.Builder) (hcl.HclType, string) {
 			break
 		}
 		sb.WriteString(s)
+		echo.WriteString(s)
 	}
 	sb.WriteString("\n")
 	return hclType, docTag
 }
 
-func readLine(br *bufio.Reader, sb *strings.Builder) {
+func readLine(br *bufio.Reader, echo *strings.Builder, sb *strings.Builder) {
 	s, err := br.ReadString('\n')
 	if err != nil {
 		panic(err)
 	}
+	echo.WriteString(s)
 	sb.WriteString(s)
 }
 
-func readString(br *bufio.Reader, sb *strings.Builder, nodes []hcl.HclNode) ([]hcl.HclNode, error) {
+func readString(br *bufio.Reader, echo *strings.Builder, sb *strings.Builder, nodes []hcl.HclNode) ([]hcl.HclNode, error) {
 	escape := false
-	interlop := false
+	interlop := '\x00'
 	for {
 		r, _, err := br.ReadRune()
 		if err != nil {
 			return nil, err
 		}
+		echo.WriteRune(r)
 
 		if r == '\\' {
 			escape = !escape
-			interlop = false
+			interlop = 0
 			sb.WriteRune(r)
-		} else if r == '$' {
-			if interlop {
-				sb.WriteRune('$')
-				interlop = false
+		} else if r == '$' || r == '%' {
+			if interlop != '\x00' {
+				sb.WriteRune(r)
+				interlop = '\x00'
 			} else {
-				interlop = true
+				interlop = r
 			}
 			sb.WriteRune(r)
-		} else if interlop && r == '{' {
-			interlop = false
-			nodes = readNodes(br, nodes, false)
+		} else if interlop != 0 && r == '{' {
+			interlop = 0
+			newEcho := &strings.Builder{}
+			nodes = readNodes(br, newEcho, nodes, false)
+			echo.WriteString(newEcho.String())
 			sb.WriteRune('{')
-			for n := range nodes {
-				node := nodes[n]
-				v := node.String()
-				sb.WriteString(v)
-			}
-			sb.WriteRune('}')
+			sb.WriteString(newEcho.String())
 		} else if r == '"' {
-			if interlop {
+			if interlop != '\x00' {
 				sb.WriteRune('$')
 			}
-			interlop = false
+			interlop = '\x00'
 			sb.WriteRune(r)
 			if !escape {
 				break
 			}
 			escape = false
 		} else {
-			if interlop {
+			if interlop != '\x00' {
 				sb.WriteRune('$')
 			}
-			interlop = false
+			interlop = '\x00'
 			sb.WriteRune(r)
 		}
 	}
